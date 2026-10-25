@@ -61,6 +61,43 @@ final class ContainerCacheTest extends TestCase
         $this->app('production', FrameworkProvider::class);
     }
 
+    public function testTheCacheFileReturnsItsClassName(): void
+    {
+        $this->app('development');
+
+        $this->assertMatchesRegularExpression('/^return \\\\Zana\\\\CompiledContainer\\\\Container[0-9a-f]{16}::class;$/m', (string) file_get_contents($this->file));
+    }
+
+    public function testCacheFilesWithoutTheReturnStatementStillLoad(): void
+    {
+        $this->app('production', FrameworkProvider::class);
+        $source = (string) file_get_contents($this->file);
+        $older = (string) preg_replace('/^return .*$/m', '', str_replace('final class Container', 'final class Older', $source));
+        file_put_contents($this->file, $older);
+
+        $app = (new \ReflectionClass(\Zana\Core\ApplicationBuilder::class))->getProperty('compiled');
+        $app->setValue(null, []);   // as in a new process
+
+        $this->assertInstanceOf(Clock::class, $this->app('production', FrameworkProvider::class)->container()->get(Clock::class));
+        $this->assertSame($older, file_get_contents($this->file), 'loaded, not rewritten');
+    }
+
+    public function testAFileRewrittenByAnotherProcessIsPickedUp(): void
+    {
+        $this->app('development');                                    // this process loads the cache
+
+        $file = $this->file;
+        $this->file = dirname($file) . '/other.php';                  // "another process" compiles a new one
+        $this->app('production', FrameworkProvider::class);
+        copy($this->file, $file);
+        unlink($this->file);
+        $this->file = $file;
+
+        $app = $this->app('production', FrameworkProvider::class);    // stale in memory, fresh on disk
+
+        $this->assertTrue($app->container()->has(Clock::class));
+    }
+
     public function testForeignCacheFilesAreRejected(): void
     {
         @mkdir(dirname($this->file), 0777, true);

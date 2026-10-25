@@ -36,6 +36,9 @@ final class ApplicationBuilder
 
     private ?string $containerCache = null;
 
+    /** @var array<string, class-string> Compiled container classes loaded in this process, by file */
+    private static array $compiled = [];
+
     private readonly string $basePath;
 
     public function __construct(string $basePath)
@@ -209,10 +212,19 @@ final class ApplicationBuilder
             return $services->build();
         }
 
-        if (is_file($this->containerCache)) {
+        $file = $this->containerCache;
+        $remembered = isset(self::$compiled[$file]);
+        if ($remembered || is_file($file)) {
             try {
-                return $services->build(compiled: self::loadCompiled($this->containerCache));
+                return $services->build(compiled: self::loadCompiled($file));
             } catch (StaleCompilationException $e) {
+                if ($remembered) {
+                    // Another process may have rewritten the file since this one loaded it
+                    try {
+                        return $services->build(compiled: self::$compiled[$file] = self::classDeclaredIn($file));
+                    } catch (StaleCompilationException $e) {
+                    }
+                }
                 if ($environment->isProduction()) {
                     throw $e;
                 }
@@ -221,17 +233,42 @@ final class ApplicationBuilder
 
         $class = 'Zana\\CompiledContainer\\Container' . bin2hex(random_bytes(8));
         $source = (new ContainerCompiler())->compile($services, $class);
-        self::writeAtomically($this->containerCache, $source);
+        self::writeAtomically($file, $source . "\nreturn \\{$class}::class;\n");
+        unset(self::$compiled[$file]);
 
-        return $services->build(compiled: self::loadCompiled($this->containerCache));
+        return $services->build(compiled: self::loadCompiled($file));
     }
 
     /**
      * Include a compiled container file and return the class it declares.
      *
+     * The file returns its class name, so a load costs one include (served by
+     * OPcache) rather than reading the file; the name is then remembered.
+     *
      * @return class-string
      */
     private static function loadCompiled(string $file): string
+    {
+        if (isset(self::$compiled[$file])) {
+            return self::$compiled[$file];
+        }
+
+        $name = require $file;
+        if (is_string($name) && class_exists($name, false)) {
+            return self::$compiled[$file] = $name;
+        }
+
+        // A file written by an earlier version, without the return statement
+        return self::$compiled[$file] = self::classDeclaredIn($file);
+    }
+
+    /**
+     * Find the class a compiled container file declares by reading it, and
+     * include the file unless the class is already declared.
+     *
+     * @return class-string
+     */
+    private static function classDeclaredIn(string $file): string
     {
         $source = (string) file_get_contents($file);
         if (preg_match('/^namespace\s+([^;]+);/m', $source, $namespace) !== 1
