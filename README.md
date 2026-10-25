@@ -73,6 +73,17 @@ appears in container errors and the service graph.
 5. Build the container (compiled and cached when configured).
 6. Boot providers and modules, in the same order.
 
+## New in 2.1
+
+- **Deployment checks.** After boot, the application refuses to start
+  when debug is on for a public `app.url`, when debug is on in production,
+  or when a secret is a placeholder in production. Add your own checks
+  with the `core.deployment_checks` tag.
+- **Configuration overrides.** `withConfiguration(['site.url' => '...'])`
+  is the last layer, above environment variables.
+- **`.env.testing`.** In the `testing` environment it replaces `.env` when
+  it exists.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

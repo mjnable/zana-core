@@ -3,6 +3,23 @@
 All Zana packages share one version number and are released together. A release that did
 not change this package is not listed.
 
+## 2.1.0 — unreleased
+
+### Added
+
+- Deployment checks after boot (FE-24): debug on a public `app.url`, debug in production,
+  placeholder secrets in production (`app.secret_keys`), and an unwritable container cache
+  directory. Applications add checks tagged `core.deployment_checks`; a fatal result throws
+  `UnsafeDeploymentException`. `app.deployment_checks: false` disables them.
+- `ApplicationBuilder::withConfiguration()`: a last configuration layer, above environment
+  variables, with nested or dotted keys (FE-09).
+- The `testing` environment loads `.env.testing` instead of `.env` when it exists (FE-09).
+- `ApplicationBuilder::basePath()`.
+
+### Changed
+
+- `ApplicationException` is no longer final, so `UnsafeDeploymentException` can extend it.
+
 ## 2.0.0 — 2026-10-26
 
 The final 2.0 release. No changes since 2.0.0-rc.1.
