@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Zana\Core;
 
 use Closure;
+use Psr\Log\LoggerInterface;
 use Zana\Configuration\ConfigurationBuilder;
 use Zana\Configuration\ConfigurationInterface;
 use Zana\Configuration\ConfigValueProvider;
@@ -35,6 +36,9 @@ final class ApplicationBuilder
     private array $services = [];
 
     private ?string $containerCache = null;
+
+    /** @var array<string, mixed> */
+    private array $configuration = [];
 
     /** @var array<string, class-string> Compiled container classes loaded in this process, by file */
     private static array $compiled = [];
@@ -101,13 +105,32 @@ final class ApplicationBuilder
     }
 
     /**
+     * Override configuration values: a last layer, above environment variables.
+     * Keys may be nested arrays or dotted, e.g. ['site.url' => 'http://localhost'].
+     *
+     * @param array<array-key, mixed> $overrides
+     */
+    public function withConfiguration(array $overrides): self
+    {
+        $this->configuration = ConfigurationBuilder::merge($this->configuration, self::expandDotted($overrides));
+
+        return $this;
+    }
+
+    public function basePath(): string
+    {
+        return $this->basePath;
+    }
+
+    /**
      * Run the boot lifecycle and return the booted application.
      *
      * @throws ApplicationException
+     * @throws Deployment\UnsafeDeploymentException When a deployment check is fatal
      */
     public function build(): Application
     {
-        DotEnv::load($this->basePath . '/.env');
+        $this->loadDotEnv();
 
         $environment = $this->detectEnvironment();
         $modules = ModuleSorter::sort($this->resolveModules());
@@ -139,7 +162,77 @@ final class ApplicationBuilder
             $provider->boot($container);
         }
 
+        $this->runDeploymentChecks($application, $container);
+
         return $application;
+    }
+
+    /**
+     * .env, or .env.testing instead in the testing environment when it exists,
+     * so a developer's .env never leaks into the test run.
+     */
+    private function loadDotEnv(): void
+    {
+        $environment = $this->environment ?? self::env('APP_ENV');
+        $testing = $this->basePath . '/.env.testing';
+
+        DotEnv::load($environment === 'testing' && is_file($testing) ? $testing : $this->basePath . '/.env');
+    }
+
+    /**
+     * @throws Deployment\UnsafeDeploymentException
+     */
+    private function runDeploymentChecks(Application $application, ContainerInterface $container): void
+    {
+        if (!$application->config()->bool('app.deployment_checks', true)) {
+            return;
+        }
+
+        $checks = [new Deployment\BuiltInChecks($this->containerCache)];
+        foreach ($container->tagged(Deployment\DeploymentCheck::TAG) as $check) {
+            if (!$check instanceof Deployment\DeploymentCheck) {
+                throw new ApplicationException(sprintf('Services tagged "%s" must implement %s; %s does not.', Deployment\DeploymentCheck::TAG, Deployment\DeploymentCheck::class, $check::class));
+            }
+            $checks[] = $check;
+        }
+
+        $problems = [];
+        foreach ($checks as $check) {
+            $result = $check->check($application);
+            if ($result->status === Deployment\CheckStatus::Fatal) {
+                $problems[] = $result->message;
+            } elseif ($result->status === Deployment\CheckStatus::Warning && $container->has(LoggerInterface::class)) {
+                $logger = $container->get(LoggerInterface::class);
+                if ($logger instanceof LoggerInterface) {
+                    $logger->warning('Deployment check: ' . $result->message);
+                }
+            }
+        }
+
+        if ($problems !== []) {
+            throw Deployment\UnsafeDeploymentException::because($problems);
+        }
+    }
+
+    /**
+     * @param array<array-key, mixed> $values
+     * @return array<string, mixed>
+     */
+    private static function expandDotted(array $values): array
+    {
+        $expanded = [];
+        foreach ($values as $key => $value) {
+            if (is_array($value) && !array_is_list($value)) {
+                $value = self::expandDotted($value);
+            }
+            foreach (array_reverse(explode('.', (string) $key)) as $segment) {
+                $value = [$segment => $value];
+            }
+            /** @var array<string, mixed> $value */
+            $expanded = ConfigurationBuilder::merge($expanded, $value);
+        }
+
+        return $expanded;
     }
 
     private function detectEnvironment(): Environment
@@ -203,6 +296,7 @@ final class ApplicationBuilder
             ->addDirectory($this->basePath . '/config', except: ['modules'])
             ->addDirectory($this->basePath . '/config/' . $environment->name)
             ->addEnvironment()
+            ->addArray($this->configuration)
             ->build();
     }
 
