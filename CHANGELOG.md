@@ -17,6 +17,7 @@ not change this package is not listed.
 
 - The startup deployment checks no longer check for a cache file the boot has just loaded or
   written.
+- `OriginServiceCollection` forwards `uses()` (FE-40). Requires `mj-zana/container` ^2.4.
 
 ## 2.3.0 — 2026-10-26
 

@@ -99,6 +99,13 @@ final class OriginServiceCollection implements ServiceCollectionInterface
         return $this;
     }
 
+    public function uses(string ...$services): static
+    {
+        $this->inner->uses(...$services);
+
+        return $this;
+    }
+
     public function tag(string $tag, string ...$services): static
     {
         $this->inner->tag($tag, ...$services);
