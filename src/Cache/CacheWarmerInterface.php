@@ -12,7 +12,7 @@ use Zana\Core\ApplicationInterface;
  */
 interface CacheWarmerInterface
 {
-    public const string TAG = 'core.cache_warmers';
+    public const string WARMER_TAG = 'core.cache_warmers';
 
     /**
      * @return list<string> What was warmed, for the command's output

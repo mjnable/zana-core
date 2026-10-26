@@ -12,7 +12,7 @@ use Zana\Core\ApplicationInterface;
  */
 interface CacheClearerInterface
 {
-    public const string TAG = 'core.cache_clearers';
+    public const string CLEARER_TAG = 'core.cache_clearers';
 
     /**
      * @return list<string> What was cleared, for the command's output
