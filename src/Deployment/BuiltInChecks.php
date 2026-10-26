@@ -18,7 +18,7 @@ final readonly class BuiltInChecks implements DeploymentCheck
     private const array LOCAL_SUFFIXES = ['.localhost', '.test', '.local', '.internal', '.example'];
     private const array PLACEHOLDER_PREFIXES = ['change-me', 'changeme', 'your-'];
 
-    public function __construct(private ?string $containerCache = null)
+    public function __construct(private ?string $containerCache = null, private ?string $configurationCache = null)
     {
     }
 
@@ -49,14 +49,19 @@ final readonly class BuiltInChecks implements DeploymentCheck
             }
         }
 
-        if ($this->containerCache !== null && !is_file($this->containerCache)) {
-            $directory = dirname($this->containerCache);
+        foreach (array_filter(['container' => $this->containerCache, 'configuration' => $this->configurationCache]) as $kind => $file) {
+            if (is_file($file)) {
+                continue;
+            }
+            $directory = dirname($file);
             $existing = $directory;
             while (!is_dir($existing) && dirname($existing) !== $existing) {
                 $existing = dirname($existing);
             }
             if (!is_writable($existing)) {
-                $warnings[] = "The container cache cannot be written to {$directory}; every request compiles the container.";
+                $warnings[] = $kind === 'container'
+                    ? "The container cache cannot be written to {$directory}; every request compiles the container."
+                    : "The configuration cache cannot be written to {$directory}; every request reads the configuration files.";
             }
         }
 

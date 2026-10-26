@@ -16,6 +16,7 @@ $app = Application::configure(basePath: dirname(__DIR__))
     ->withProviders(LoggingServiceProvider::class, HttpServiceProvider::class)
     ->withServices(fn ($services) => $services->singleton(Clock::class))
     ->withContainerCache(dirname(__DIR__) . '/var/cache/container.php')   // optional
+    ->withConfigurationCache(dirname(__DIR__) . '/var/cache/config.php')  // optional, production only (2.4)
     ->build();
 
 $app->container()->get(Clock::class);

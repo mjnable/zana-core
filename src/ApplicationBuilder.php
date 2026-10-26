@@ -42,8 +42,13 @@ final class ApplicationBuilder
 
     private bool $recompileInConsole = false;
 
+    private ?string $configurationCache = null;
+
     /** @var array<string, class-string> Compiled container classes loaded in this process, by file */
     private static array $compiled = [];
+
+    /** @var array<string, array{environment: string, modules: list<class-string<Module>>, values: array<string, mixed>}> Configuration caches read in this process, by file */
+    private static array $configurations = [];
 
     private readonly string $basePath;
 
@@ -107,6 +112,20 @@ final class ApplicationBuilder
     }
 
     /**
+     * In production, keep the configuration files' values and the module list
+     * in this PHP file instead of reading config/ on every boot (ADR-019).
+     * .env, APP_* variables and withConfiguration() still apply on top. The
+     * cache is written on the first boot without it, deleted by cache:clear
+     * and rewritten by cache:warm; it is never checked against the files.
+     */
+    public function withConfigurationCache(string $file): self
+    {
+        $this->configurationCache = $file;
+
+        return $this;
+    }
+
+    /**
      * Override configuration values: a last layer, above environment variables.
      * Keys may be nested arrays or dotted, e.g. ['site.url' => 'http://localhost'].
      *
@@ -136,7 +155,17 @@ final class ApplicationBuilder
 
         $container = $this->buildContainer($services, $environment);
 
-        $application = new Application($this->basePath, $environment, $config, $container, $modules, $this->containerCache, $this->compileContainerCache(...));
+        $application = new Application(
+            $this->basePath,
+            $environment,
+            $config,
+            $container,
+            $modules,
+            $this->containerCache,
+            $this->compileContainerCache(...),
+            $this->configurationCache,
+            $this->compileConfigurationCache(...),
+        );
         $holder->set($application);
 
         foreach ([...$providers, ...$modules] as $provider) {
@@ -182,6 +211,26 @@ final class ApplicationBuilder
     }
 
     /**
+     * Write the configuration cache from the configuration files, for the
+     * current environment: what cache:warm runs after a deployment.
+     *
+     * @return string The cache file
+     * @throws ApplicationException Without withConfigurationCache(), or when a value cannot be cached
+     */
+    public function compileConfigurationCache(): string
+    {
+        $file = $this->configurationCache ?? throw new ApplicationException('There is no configuration cache: call withConfigurationCache().');
+
+        $this->loadDotEnv();
+        $environment = $this->detectEnvironment();
+        $listed = $this->listedModules();
+        $values = $this->fileConfiguration($environment, ModuleSorter::sort($this->resolveModules($listed)));
+        $this->writeConfigurationCache($environment, $listed, $values);
+
+        return $file;
+    }
+
+    /**
      * In a console command, recompile a stale container cache instead of
      * failing, even in production: e.g. bin/zana after a deployment, so
      * deployment commands can still run. Web requests keep failing on a
@@ -204,8 +253,23 @@ final class ApplicationBuilder
         $this->loadDotEnv();
 
         $environment = $this->detectEnvironment();
-        $modules = ModuleSorter::sort($this->resolveModules());
-        $config = $this->loadConfiguration($environment, $modules);
+        $cached = $this->readConfigurationCache($environment);
+        $listed = $cached['modules'] ?? $this->listedModules();
+        $modules = ModuleSorter::sort($this->resolveModules($listed));
+        $values = $cached['values'] ?? $this->fileConfiguration($environment, $modules);
+        if ($cached === null && $this->configurationCache !== null && $environment->isProduction()) {
+            try {
+                $this->writeConfigurationCache($environment, $listed, $values);
+            } catch (ApplicationException) {
+                // Not cacheable (an object or closure in a file) or not writable: boot without the cache.
+                // cache:warm reports why; the deployment checks warn about an unwritable directory.
+            }
+        }
+        $config = (new ConfigurationBuilder())
+            ->addArray($values)
+            ->addEnvironment()
+            ->addArray($this->configuration)
+            ->build();
         $providers = array_map(self::instantiate(...), $this->providers);
 
         $services = new ServiceCollection([$environment->name]);
@@ -237,7 +301,12 @@ final class ApplicationBuilder
         }
 
         $problems = [];
-        foreach (Deployment\DeploymentChecks::run($application, $this->containerCache) as [, $result]) {
+        // A cache this boot has just loaded or written exists: only check the others
+        $containerCache = $this->containerCache !== null && isset(self::$compiled[$this->containerCache]) ? null : $this->containerCache;
+        $configurationCache = $application->environment()->isProduction() && $this->configurationCache !== null && !isset(self::$configurations[$this->configurationCache])
+            ? $this->configurationCache
+            : null;
+        foreach (Deployment\DeploymentChecks::run($application, $containerCache, $configurationCache) as [, $result]) {
             if ($result->status === Deployment\CheckStatus::Fatal) {
                 $problems[] = $result->message;
             } elseif ($result->status === Deployment\CheckStatus::Warning && $container->has(LoggerInterface::class)) {
@@ -286,30 +355,41 @@ final class ApplicationBuilder
     }
 
     /**
-     * Builder modules plus config/modules.php, de-duplicated, in declared order.
+     * The module classes config/modules.php lists, if it exists.
      *
-     * @return list<Module>
+     * @return list<class-string<Module>>
      */
-    private function resolveModules(): array
+    private function listedModules(): array
     {
-        $declared = $this->modules;
-
         $file = $this->basePath . '/config/modules.php';
-        if (is_file($file)) {
-            $listed = (static fn (string $path): mixed => require $path)($file);
-            if (!is_array($listed) || !array_is_list($listed)) {
-                throw new ApplicationException("{$file} must return a list of module class names.");
-            }
-            foreach ($listed as $class) {
-                if (!is_string($class) || !is_subclass_of($class, Module::class)) {
-                    throw new ApplicationException(sprintf('%s lists %s, which is not a %s class.', $file, var_export($class, true), Module::class));
-                }
-                $declared[] = $class;
+        if (!is_file($file)) {
+            return [];
+        }
+
+        $listed = (static fn (string $path): mixed => require $path)($file);
+        if (!is_array($listed) || !array_is_list($listed)) {
+            throw new ApplicationException("{$file} must return a list of module class names.");
+        }
+        foreach ($listed as $class) {
+            if (!is_string($class) || !is_subclass_of($class, Module::class)) {
+                throw new ApplicationException(sprintf('%s lists %s, which is not a %s class.', $file, var_export($class, true), Module::class));
             }
         }
 
+        /** @var list<class-string<Module>> $listed */
+        return $listed;
+    }
+
+    /**
+     * Builder modules plus the listed ones, de-duplicated, in declared order.
+     *
+     * @param list<class-string<Module>> $listed
+     * @return list<Module>
+     */
+    private function resolveModules(array $listed): array
+    {
         $modules = [];
-        foreach ($declared as $module) {
+        foreach ([...$this->modules, ...$listed] as $module) {
             $instance = self::instantiate($module);
             $modules[$instance::class] ??= $instance;
         }
@@ -318,9 +398,13 @@ final class ApplicationBuilder
     }
 
     /**
+     * The merged values of the configuration files: modules' Configuration
+     * folders, config/ and config/<environment>/.
+     *
      * @param list<Module> $modules
+     * @return array<string, mixed>
      */
-    private function loadConfiguration(Environment $environment, array $modules): ConfigurationInterface
+    private function fileConfiguration(Environment $environment, array $modules): array
     {
         $builder = new ConfigurationBuilder();
 
@@ -334,9 +418,72 @@ final class ApplicationBuilder
         return $builder
             ->addDirectory($this->basePath . '/config', except: ['modules'])
             ->addDirectory($this->basePath . '/config/' . $environment->name)
-            ->addEnvironment()
-            ->addArray($this->configuration)
-            ->build();
+            ->build()
+            ->all();
+    }
+
+    /**
+     * The cached file configuration, in production when the cache exists and
+     * was written for this environment.
+     *
+     * @return array{environment: string, modules: list<class-string<Module>>, values: array<string, mixed>}|null
+     */
+    private function readConfigurationCache(Environment $environment): ?array
+    {
+        $file = $this->configurationCache;
+        if ($file === null || !$environment->isProduction()) {
+            return null;
+        }
+
+        if (!isset(self::$configurations[$file])) {
+            if (!is_file($file)) {
+                return null;
+            }
+            $data = (static fn (string $path): mixed => require $path)($file);
+            if (!is_array($data) || !is_string($data['environment'] ?? null) || !is_array($data['modules'] ?? null) || !is_array($data['values'] ?? null)) {
+                return null;
+            }
+            /** @var array{environment: string, modules: list<class-string<Module>>, values: array<string, mixed>} $data */
+            self::$configurations[$file] = $data;
+        }
+
+        return self::$configurations[$file]['environment'] === $environment->name ? self::$configurations[$file] : null;
+    }
+
+    /**
+     * @param list<class-string<Module>> $modules
+     * @param array<string, mixed> $values
+     * @throws ApplicationException When a value cannot be cached, or the file cannot be written
+     */
+    private function writeConfigurationCache(Environment $environment, array $modules, array $values): void
+    {
+        assert($this->configurationCache !== null);
+        self::assertCacheable($values, '');
+
+        $data = ['environment' => $environment->name, 'modules' => $modules, 'values' => $values];
+        self::writeAtomically(
+            $this->configurationCache,
+            "<?php\n\n// The configuration files' values, written by Zana for the \"{$environment->name}\" environment (ADR-019).\n"
+            . "// Delete it, or run cache:clear, after changing a configuration file.\n\nreturn " . var_export($data, true) . ";\n",
+            'configuration cache',
+        );
+        self::$configurations[$this->configurationCache] = $data;
+    }
+
+    /**
+     * @throws ApplicationException For an object (other than an enum) or a closure
+     */
+    private static function assertCacheable(mixed $value, string $key): void
+    {
+        if (is_array($value)) {
+            foreach ($value as $name => $item) {
+                self::assertCacheable($item, $key === '' ? (string) $name : "{$key}.{$name}");
+            }
+        } elseif (is_object($value) && !$value instanceof \UnitEnum) {
+            throw new ApplicationException("The configuration cannot be cached: {$key} is " . get_debug_type($value) . '. Configuration files must return plain values (strings, numbers, booleans, null, arrays, enums).');
+        } elseif (is_resource($value)) {
+            throw new ApplicationException("The configuration cannot be cached: {$key} is a resource.");
+        }
     }
 
     private function buildContainer(ServiceCollection $services, Environment $environment): ContainerInterface
@@ -422,17 +569,17 @@ final class ApplicationBuilder
         return $name;
     }
 
-    private static function writeAtomically(string $file, string $contents): void
+    private static function writeAtomically(string $file, string $contents, string $what = 'container cache'): void
     {
         $directory = dirname($file);
-        if (!is_dir($directory) && !mkdir($directory, 0775, true) && !is_dir($directory)) {
-            throw new ApplicationException("Cannot create the directory for the container cache: {$directory}.");
+        if (!is_dir($directory) && !@mkdir($directory, 0775, true) && !is_dir($directory)) {
+            throw new ApplicationException("Cannot create the directory for the {$what}: {$directory}.");
         }
 
         $temporary = $file . '.' . bin2hex(random_bytes(4)) . '.tmp';
-        if (file_put_contents($temporary, $contents) === false || !rename($temporary, $file)) {
+        if (@file_put_contents($temporary, $contents) === false || !@rename($temporary, $file)) {
             @unlink($temporary);
-            throw new ApplicationException("Cannot write the container cache: {$file}.");
+            throw new ApplicationException("Cannot write the {$what}: {$file}.");
         }
 
         if (function_exists('opcache_invalidate')) {

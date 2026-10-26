@@ -3,6 +3,21 @@
 All Zana packages share one version number and are released together. A release that did
 not change this package is not listed.
 
+## 2.4.0 — unreleased
+
+### Added
+
+- `ApplicationBuilder::withConfigurationCache()`: in production, the configuration files' values and
+  the module list come from one cache file, written on the first boot; `.env`, `APP_*` variables and
+  overrides still apply on top (ADR-019). `compileConfigurationCache()` writes it for `cache:warm`;
+  `Application::configurationCache()` and `compileConfigurationCache()` expose it.
+- `DeploymentChecks::run()` takes the configuration cache, and warns when it cannot be written.
+
+### Changed
+
+- The startup deployment checks no longer check for a cache file the boot has just loaded or
+  written.
+
 ## 2.3.0 — 2026-10-26
 
 ### Changed

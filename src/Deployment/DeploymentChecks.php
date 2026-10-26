@@ -17,9 +17,9 @@ final class DeploymentChecks
     /**
      * @return list<array{string, CheckResult}> check class => result
      */
-    public static function run(ApplicationInterface $application, ?string $containerCache = null): array
+    public static function run(ApplicationInterface $application, ?string $containerCache = null, ?string $configurationCache = null): array
     {
-        $checks = [new BuiltInChecks($containerCache)];
+        $checks = [new BuiltInChecks($containerCache, $configurationCache)];
         foreach ($application->container()->tagged(DeploymentCheck::TAG) as $check) {
             if (!$check instanceof DeploymentCheck) {
                 throw new ApplicationException(sprintf('Services tagged "%s" must implement %s; %s does not.', DeploymentCheck::TAG, DeploymentCheck::class, $check::class));
