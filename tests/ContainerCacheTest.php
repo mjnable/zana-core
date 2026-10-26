@@ -61,6 +61,32 @@ final class ContainerCacheTest extends TestCase
         $this->app('production', FrameworkProvider::class);
     }
 
+    public function testConsolesMayRecompileAStaleCacheInProduction(): void
+    {
+        $this->app('production');
+
+        $app = Application::configure(sys_get_temp_dir() . '/zana-core-cache-app')
+            ->withEnvironment('production')
+            ->withProviders(FrameworkProvider::class)
+            ->withServices(static fn (ServiceCollectionInterface $s) => $s->transient('closure', static fn (): Clock => new Clock()))
+            ->withContainerCache($this->file)
+            ->recompileStaleContainerInConsole()
+            ->build();
+
+        $this->assertTrue($app->container()->has(Clock::class));
+    }
+
+    public function testTheCacheCanBeCompiledWithoutBooting(): void
+    {
+        $app = $this->app('development', FrameworkProvider::class);
+        unlink($this->file);
+
+        $this->assertSame($this->file, $app->compileContainerCache());
+        $this->assertFileExists($this->file);
+        $this->assertSame($this->file, $app->containerCache());
+        $this->assertNull(Application::configure(sys_get_temp_dir() . '/zana-core-cache-app')->withEnvironment('testing')->build()->compileContainerCache(), 'no cache');
+    }
+
     public function testTheCacheFileReturnsItsClassName(): void
     {
         $this->app('development');

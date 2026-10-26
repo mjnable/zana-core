@@ -40,6 +40,8 @@ final class ApplicationBuilder
     /** @var array<string, mixed> */
     private array $configuration = [];
 
+    private bool $recompileInConsole = false;
+
     /** @var array<string, class-string> Compiled container classes loaded in this process, by file */
     private static array $compiled = [];
 
@@ -130,32 +132,11 @@ final class ApplicationBuilder
      */
     public function build(): Application
     {
-        $this->loadDotEnv();
-
-        $environment = $this->detectEnvironment();
-        $modules = ModuleSorter::sort($this->resolveModules());
-        $config = $this->loadConfiguration($environment, $modules);
-        $providers = array_map(self::instantiate(...), $this->providers);
-
-        $services = new ServiceCollection([$environment->name]);
-        $holder = new ApplicationHolder();
-
-        foreach ([...$providers, ...$modules] as $provider) {
-            $provider->register(new OriginServiceCollection($services, $provider->origin()));
-        }
-        foreach ($this->services as $register) {
-            $register(new OriginServiceCollection($services, 'app'));
-        }
-
-        $services
-            ->singleton(ApplicationInterface::class, static fn (): ApplicationInterface => $holder->get(), origin: 'zana/core')
-            ->instance(ConfigurationInterface::class, $config, origin: 'zana/core')
-            ->instance(Environment::class, $environment, origin: 'zana/core')
-            ->addParameterProvider(new ConfigValueProvider($config));
+        [$services, $environment, $config, $providers, $modules, $holder] = $this->collect();
 
         $container = $this->buildContainer($services, $environment);
 
-        $application = new Application($this->basePath, $environment, $config, $container, $modules);
+        $application = new Application($this->basePath, $environment, $config, $container, $modules, $this->containerCache, $this->compileContainerCache(...));
         $holder->set($application);
 
         foreach ([...$providers, ...$modules] as $provider) {
@@ -180,6 +161,73 @@ final class ApplicationBuilder
     }
 
     /**
+     * Compile the container into the cache file, without booting: what the
+     * cache:warm command runs after a deployment.
+     *
+     * @return string The cache file
+     * @throws ApplicationException Without withContainerCache()
+     */
+    public function compileContainerCache(): string
+    {
+        if ($this->containerCache === null) {
+            throw new ApplicationException('There is no container cache: call withContainerCache().');
+        }
+
+        [$services] = $this->collect();
+        $class = 'Zana\\CompiledContainer\\Container' . bin2hex(random_bytes(8));
+        self::writeAtomically($this->containerCache, (new ContainerCompiler())->compile($services, $class) . "\nreturn \\{$class}::class;\n");
+        unset(self::$compiled[$this->containerCache]);
+
+        return $this->containerCache;
+    }
+
+    /**
+     * In a console command, recompile a stale container cache instead of
+     * failing, even in production: e.g. bin/zana after a deployment, so
+     * deployment commands can still run. Web requests keep failing on a
+     * stale cache.
+     */
+    public function recompileStaleContainerInConsole(bool $recompile = true): self
+    {
+        $this->recompileInConsole = $recompile;
+
+        return $this;
+    }
+
+    /**
+     * The registration phase: environment, modules, configuration, providers.
+     *
+     * @return array{ServiceCollection, Environment, ConfigurationInterface, list<ServiceProvider>, list<Module>, ApplicationHolder}
+     */
+    private function collect(): array
+    {
+        $this->loadDotEnv();
+
+        $environment = $this->detectEnvironment();
+        $modules = ModuleSorter::sort($this->resolveModules());
+        $config = $this->loadConfiguration($environment, $modules);
+        $providers = array_map(self::instantiate(...), $this->providers);
+
+        $services = new ServiceCollection([$environment->name]);
+        $holder = new ApplicationHolder();
+
+        foreach ([...$providers, ...$modules] as $provider) {
+            $provider->register(new OriginServiceCollection($services, $provider->origin()));
+        }
+        foreach ($this->services as $register) {
+            $register(new OriginServiceCollection($services, 'app'));
+        }
+
+        $services
+            ->singleton(ApplicationInterface::class, static fn (): ApplicationInterface => $holder->get(), origin: 'zana/core')
+            ->instance(ConfigurationInterface::class, $config, origin: 'zana/core')
+            ->instance(Environment::class, $environment, origin: 'zana/core')
+            ->addParameterProvider(new ConfigValueProvider($config));
+
+        return [$services, $environment, $config, $providers, $modules, $holder];
+    }
+
+    /**
      * @throws Deployment\UnsafeDeploymentException
      */
     private function runDeploymentChecks(Application $application, ContainerInterface $container): void
@@ -188,17 +236,8 @@ final class ApplicationBuilder
             return;
         }
 
-        $checks = [new Deployment\BuiltInChecks($this->containerCache)];
-        foreach ($container->tagged(Deployment\DeploymentCheck::TAG) as $check) {
-            if (!$check instanceof Deployment\DeploymentCheck) {
-                throw new ApplicationException(sprintf('Services tagged "%s" must implement %s; %s does not.', Deployment\DeploymentCheck::TAG, Deployment\DeploymentCheck::class, $check::class));
-            }
-            $checks[] = $check;
-        }
-
         $problems = [];
-        foreach ($checks as $check) {
-            $result = $check->check($application);
+        foreach (Deployment\DeploymentChecks::run($application, $this->containerCache) as [, $result]) {
             if ($result->status === Deployment\CheckStatus::Fatal) {
                 $problems[] = $result->message;
             } elseif ($result->status === Deployment\CheckStatus::Warning && $container->has(LoggerInterface::class)) {
@@ -319,7 +358,7 @@ final class ApplicationBuilder
                     } catch (StaleCompilationException $e) {
                     }
                 }
-                if ($environment->isProduction()) {
+                if ($environment->isProduction() && !($this->recompileInConsole && PHP_SAPI === 'cli')) {
                     throw $e;
                 }
             }

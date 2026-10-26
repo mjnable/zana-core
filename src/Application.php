@@ -14,6 +14,7 @@ final class Application implements ApplicationInterface
 {
     /**
      * @param list<Module> $modules
+     * @param (\Closure(): string)|null $compileContainer Rewrites the container cache (ApplicationBuilder::compileContainerCache())
      */
     public function __construct(
         private readonly string $basePath,
@@ -21,7 +22,27 @@ final class Application implements ApplicationInterface
         private readonly ConfigurationInterface $config,
         private readonly ContainerInterface $container,
         private readonly array $modules,
+        private readonly ?string $containerCache = null,
+        private readonly ?\Closure $compileContainer = null,
     ) {
+    }
+
+    /**
+     * The compiled container cache file, when the application uses one.
+     */
+    public function containerCache(): ?string
+    {
+        return $this->containerCache;
+    }
+
+    /**
+     * Recompile the container cache from the current registrations.
+     *
+     * @return string|null The cache file, or null without a cache
+     */
+    public function compileContainerCache(): ?string
+    {
+        return $this->compileContainer === null || $this->containerCache === null ? null : ($this->compileContainer)();
     }
 
     public static function configure(string $basePath): ApplicationBuilder
