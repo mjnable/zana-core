@@ -3,6 +3,18 @@
 All Zana packages share one version number and are released together. A release that did
 not change this package is not listed.
 
+## 2.2.0 — unreleased
+
+### Added
+
+- `CacheClearerInterface` and `CacheWarmerInterface`, collected by the tags `CLEARER_TAG` and
+  `WARMER_TAG`, for `cache:clear` and `cache:warm` (FE-18).
+- `DeploymentChecks`: runs the built-in and tagged deployment checks, for the startup and the
+  `doctor` command (FE-18).
+- `ApplicationBuilder::recompileStaleContainerInConsole()`: the console rebuilds a compiled
+  container older than the code, so `make:*` commands do not leave it stale.
+- `Application::containerCache()` and `compileContainer()`, used by the cache commands.
+
 ## 2.1.0 — 2026-10-26
 
 ### Added
