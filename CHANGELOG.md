@@ -3,6 +3,15 @@
 All Zana packages share one version number and are released together. A release that did
 not change this package is not listed.
 
+## 2.7.0 — 2026-10-31
+
+### Added
+
+- `Zana\Core\Inspection`: `ApplicationCheck` (tag `core.application_checks`) and `InspectionSection`
+  (tag `core.inspection_sections`), for packages and applications to add checks to the console's
+  `check` and sections to its `inspect`; `Finding` and `Severity` describe one problem, with an id, a
+  file and a hint (ADR-023).
+
 ## 2.4.0 — 2026-10-26
 
 ### Added
