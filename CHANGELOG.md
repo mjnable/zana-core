@@ -3,6 +3,14 @@
 All Zana packages share one version number and are released together. A release that did
 not change this package is not listed.
 
+## 2.11.0 — 2026-11-01
+
+### Added
+
+- `ConsoleScript`: the script that started the console (recorded by the console kernel), so hints can
+  say `php bin/zana migrate`, or "the console command `migrate`" where the script is unknown (FE-54,
+  ADR-026).
+
 ## 2.7.0 — 2026-10-31
 
 ### Added
