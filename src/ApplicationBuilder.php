@@ -37,6 +37,8 @@ final class ApplicationBuilder
 
     private ?string $containerCache = null;
 
+    private bool $cacheEverywhere = false;
+
     /** @var array<string, mixed> */
     private array $configuration = [];
 
@@ -103,10 +105,17 @@ final class ApplicationBuilder
 
     /**
      * Cache the compiled container in this PHP file (see the core specification §3, step 6).
+     *
+     * Only in production, since 2.20 (FE-70): elsewhere the container is built
+     * on each request, so a changed constructor works at once. The cache is
+     * checked against the registrations, not the constructors, and a stale one
+     * failed in the person's browser while the tests passed. $always caches
+     * in every environment, as before.
      */
-    public function withContainerCache(string $file): self
+    public function withContainerCache(string $file, bool $always = false): self
     {
         $this->containerCache = $file;
+        $this->cacheEverywhere = $always;
 
         return $this;
     }
@@ -488,7 +497,7 @@ final class ApplicationBuilder
 
     private function buildContainer(ServiceCollection $services, Environment $environment): ContainerInterface
     {
-        if ($this->containerCache === null) {
+        if ($this->containerCache === null || (!$this->cacheEverywhere && !$environment->isProduction())) {
             return $services->build();
         }
 

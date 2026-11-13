@@ -3,6 +3,15 @@
 All Zana packages share one version number and are released together. A release that did
 not change this package is not listed.
 
+## 2.20.0 — Unreleased
+
+### Changed
+
+- `withContainerCache()` caches the compiled container in production only (FE-70). Elsewhere the container is built on
+  each request, so a changed constructor works at once: the cache was checked against the registrations, not the
+  constructors, and a stale one failed in the browser while the tests passed. `withContainerCache($file, always: true)`
+  caches in every environment, as before.
+
 ## 2.11.0 — 2026-11-01
 
 ### Added

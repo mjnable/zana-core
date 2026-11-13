@@ -143,7 +143,64 @@ final class ContainerCacheTest extends TestCase
             ->withEnvironment($environment)
             ->withProviders(...$providers)
             ->withServices(static fn (ServiceCollectionInterface $s) => $s->transient('closure', static fn (): Clock => new Clock()))
-            ->withContainerCache($this->file)
+            ->withContainerCache($this->file, always: true)   // the cache's mechanics, in every environment
             ->build();
+    }
+
+    public function testOutsideProductionTheCacheIsNeitherReadNorWritten(): void
+    {
+        foreach (['development', 'testing'] as $environment) {
+            Application::configure(sys_get_temp_dir() . '/zana-core-cache-app')->withEnvironment($environment)->withContainerCache($this->file)->build();
+            $this->assertFileDoesNotExist($this->file, $environment);
+        }
+
+        Application::configure(sys_get_temp_dir() . '/zana-core-cache-app')->withEnvironment('production')->withContainerCache($this->file)->build();
+        $this->assertFileExists($this->file, 'production keeps its cache');
+    }
+
+    /**
+     * FE-70 as it happened: a registered handler gains a constructor parameter between two requests.
+     */
+    public function testAChangedConstructorWorksAtTheNextRequestInDevelopment(): void
+    {
+        $results = [];
+        foreach (['development' => 'works', 'production' => 'a stale cache, as before: cache:warm is the answer'] as $environment => $_) {
+            $folder = dirname($this->file) . "/{$environment}";
+            @mkdir($folder, 0777, true);
+            $results[$environment] = [
+                $this->request($folder, $environment, 'public function __construct(public Clock $clock) {}'),
+                $this->request($folder, $environment, 'public function __construct(public Clock $clock, public \ArrayObject $orders) {}'),
+            ];
+        }
+
+        $this->assertSame(['ok', 'ok'], $results['development'], 'the second request sees the new constructor');
+        $this->assertSame('ok', $results['production'][0]);
+        $this->assertStringContainsString('ArgumentCountError', $results['production'][1], 'production is unchanged');
+    }
+
+    /**
+     * One request in its own process, as the front controller boots: the handler's class as it is at that moment.
+     */
+    private function request(string $folder, string $environment, string $constructor): string
+    {
+        $suffix = bin2hex(random_bytes(4));
+        file_put_contents("{$folder}/Handler.php", "<?php\nnamespace App;\nuse Zana\\Core\\Tests\\Fixtures\\Clock;\nfinal class PlaceOrderHandler { {$constructor} }\n");
+        $script = "{$folder}/request-{$suffix}.php";
+        file_put_contents($script, '<?php
+require ' . var_export(dirname(__DIR__) . '/vendor/autoload.php', true) . ';
+require __DIR__ . "/Handler.php";
+try {
+    $app = Zana\Core\Application::configure(__DIR__)->withEnvironment(' . var_export($environment, true) . ')
+        ->withServices(static fn ($s) => $s->singleton(Zana\Core\Tests\Fixtures\Clock::class)->singleton(\ArrayObject::class)->transient(App\PlaceOrderHandler::class))
+        ->withContainerCache(__DIR__ . "/container.php")->build();
+    $app->container()->get(App\PlaceOrderHandler::class);
+    echo "ok";
+} catch (Throwable $e) {
+    for ($c = $e; $c !== null; $c = $c->getPrevious()) { echo get_class($c), ": ", $c->getMessage(), "\n"; }
+}');
+        $output = (string) shell_exec(escapeshellarg(PHP_BINARY) . ' -d xdebug.mode=off ' . escapeshellarg($script) . ' 2>&1');
+        unlink($script);
+
+        return trim($output);
     }
 }
