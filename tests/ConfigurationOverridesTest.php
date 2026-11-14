@@ -79,6 +79,26 @@ final class ConfigurationOverridesTest extends TestCase
         $this->assertSame('developer', getenv('FROM_DOTENV'));
     }
 
+    public function testWithoutDotEnvAProductionBuildIsTheSameOnEveryMachine(): void
+    {
+        // FE-73: a developer's .env turned the payment simulator on in a test that builds production.
+        $build = fn (): string => Application::configure($this->base)
+            ->withEnvironment('production')
+            ->withoutDotEnv()
+            ->build()
+            ->config()
+            ->string('site.url');
+
+        $clean = $build();
+        file_put_contents("{$this->base}/.env", "APP_SITE__URL=https://developer.test\nFROM_DOTENV=developer\nAPP_ENV=development\n");
+        $this->assertSame($clean, $build(), 'the same result with a .env file');
+        $this->assertSame('https://example.com', $clean);
+        $this->assertFalse(getenv('FROM_DOTENV'), 'the file was not read');
+
+        Application::configure($this->base)->withEnvironment('production')->build();
+        $this->assertSame('developer', getenv('FROM_DOTENV'), 'without withoutDotEnv(), production reads .env');
+    }
+
     public function testTheBuilderExposesTheBasePath(): void
     {
         $this->assertSame(str_replace('\\', '/', $this->base), Application::configure($this->base . '/')->basePath());

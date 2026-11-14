@@ -5,6 +5,12 @@ not change this package is not listed.
 
 ## 2.20.0 — Unreleased
 
+### Added
+
+- `ApplicationBuilder::withoutDotEnv()` reads no `.env` file (FE-73), for a test that builds another environment:
+  `.env.testing` is read only in the testing environment, so a test building production read the developer's `.env`
+  and gave another result on another machine. Variables already in the process environment still count.
+
 ### Changed
 
 - `withContainerCache()` caches the compiled container in production only (FE-70). Elsewhere the container is built on

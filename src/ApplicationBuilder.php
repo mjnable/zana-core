@@ -46,6 +46,8 @@ final class ApplicationBuilder
 
     private ?string $configurationCache = null;
 
+    private bool $dotEnv = true;
+
     /** @var array<string, class-string> Compiled container classes loaded in this process, by file */
     private static array $compiled = [];
 
@@ -65,6 +67,20 @@ final class ApplicationBuilder
     public function withEnvironment(string $environment): self
     {
         $this->environment = $environment;
+
+        return $this;
+    }
+
+    /**
+     * Read no .env file (2.20, FE-73): for a test that builds another
+     * environment, such as production to prove a deployment check, so the
+     * developer's .env cannot change its result. .env.testing is read only
+     * in the testing environment, so without this a production build read
+     * .env. Variables already in the process environment still count.
+     */
+    public function withoutDotEnv(): self
+    {
+        $this->dotEnv = false;
 
         return $this;
     }
@@ -192,6 +208,9 @@ final class ApplicationBuilder
      */
     private function loadDotEnv(): void
     {
+        if (!$this->dotEnv) {
+            return;
+        }
         $environment = $this->environment ?? self::env('APP_ENV');
         $testing = $this->basePath . '/.env.testing';
 
