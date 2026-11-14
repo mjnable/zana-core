@@ -15,6 +15,7 @@ final readonly class Finding
     /**
      * @param string $id "<source>.<rule>", stable across versions, e.g. "container.B5" or "architecture.layers"
      * @param string|null $hint What to do about it
+     * @param bool $security A security rule (2.21, FE-68): release:build refuses to build on such an error
      */
     public function __construct(
         public string $id,
@@ -23,11 +24,12 @@ final readonly class Finding
         public ?string $file = null,
         public ?int $line = null,
         public ?string $hint = null,
+        public bool $security = false,
     ) {
     }
 
     /**
-     * @return array{id: string, severity: string, message: string, file: string|null, line: int|null, hint: string|null}
+     * @return array{id: string, severity: string, message: string, file: string|null, line: int|null, hint: string|null, security: bool}
      */
     public function toArray(): array
     {
@@ -38,6 +40,7 @@ final readonly class Finding
             'file' => $this->file,
             'line' => $this->line,
             'hint' => $this->hint,
+            'security' => $this->security,
         ];
     }
 }

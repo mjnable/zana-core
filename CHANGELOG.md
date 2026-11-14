@@ -3,6 +3,16 @@
 All Zana packages share one version number and are released together. A release that did
 not change this package is not listed.
 
+## 2.21.0 — Unreleased
+
+### Added
+
+- `SecurityRules` for the security rules of `check` (FE-68, ADR-033): `severity()` is an error with
+  `security.strict: true`, and a warning otherwise, so an upgrade never fails a project's CI. Strict is off by default;
+  the skeletons turn it on.
+- `Finding` takes `security: true` for a security rule, and its array form gains `security`; `release:build` refuses to
+  build on such an error.
+
 ## 2.20.0 — 2026-11-14
 
 ### Added
