@@ -25,6 +25,8 @@ $app->environment()->isProduction();
 $app->terminate();
 ```
 
+When `.env` sets `security.secret`, both cache files are signed, and a file that was changed is not run (2.35).
+
 ## Modules
 
 Modules are listed explicitly in `config/modules.php` (ADR-009):

@@ -3,6 +3,24 @@
 All Zana packages share one version number and are released together. A release that did
 not change this package is not listed.
 
+## 2.35.0 — Unreleased
+
+### Security
+
+- The compiled container and the configuration cache are signed (a documented limit until now: they are PHP files the
+  application includes, so code written to `var/cache` by anything but the application ran on the next request).
+  When `.env`, an `APP_*` variable or `withConfiguration()` sets `security.secret`:
+  - each file carries an HMAC-SHA256 of its contents and of its kind, with a key derived from the secret;
+  - a file is read once, checked, and the bytes checked are evaluated, so a file swapped after the check does not run.
+    `includeCompiledCaches()` checks, then includes, for OPcache, where the web server cannot write to the cache
+    directory;
+  - a file without a signature (written by 2.34, or before the secret was set) is treated as missing and rewritten;
+  - a file with another signature (changed, or written with another secret) stops the boot in production, naming the
+    file; elsewhere, and in the console with `recompileStaleContainerInConsole()`, it is rewritten, so `cache:warm`
+    runs after the secret changes.
+  A secret set only in a configuration file signs nothing: the configuration cache cannot hold the key that checks it.
+- `Application::compiledCachesSigned()` says whether the files are signed.
+
 ## 2.21.0 — 2026-11-14
 
 ### Added

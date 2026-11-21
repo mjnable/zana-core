@@ -27,6 +27,7 @@ final class Application implements ApplicationInterface
         private readonly ?\Closure $compileContainer = null,
         private readonly ?string $configurationCache = null,
         private readonly ?\Closure $compileConfiguration = null,
+        private readonly bool $compiledCachesSigned = false,
     ) {
     }
 
@@ -46,6 +47,16 @@ final class Application implements ApplicationInterface
     public function compileContainerCache(): ?string
     {
         return $this->compileContainer === null || $this->containerCache === null ? null : ($this->compileContainer)();
+    }
+
+    /**
+     * Whether the compiled container and the configuration cache are signed
+     * and checked before they are included (2.35): when .env, an APP_*
+     * variable or withConfiguration() sets security.secret.
+     */
+    public function compiledCachesSigned(): bool
+    {
+        return $this->compiledCachesSigned;
     }
 
     /**

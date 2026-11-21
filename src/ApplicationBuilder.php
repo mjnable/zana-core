@@ -16,6 +16,7 @@ use Zana\Container\Contracts\ServiceCollectionInterface;
 use Zana\Container\Exception\StaleCompilationException;
 use Zana\Container\ServiceCollection;
 use Zana\Core\Internal\ApplicationHolder;
+use Zana\Core\Internal\CompiledFile;
 use Zana\Core\Internal\ModuleSorter;
 use Zana\Core\Internal\OriginServiceCollection;
 
@@ -43,6 +44,8 @@ final class ApplicationBuilder
     private array $configuration = [];
 
     private bool $recompileInConsole = false;
+
+    private bool $includeCompiled = false;
 
     private ?string $configurationCache = null;
 
@@ -190,6 +193,7 @@ final class ApplicationBuilder
             $this->compileContainerCache(...),
             $this->configurationCache,
             $this->compileConfigurationCache(...),
+            CompiledFile::key($this->configuration) !== null,
         );
         $holder->set($application);
 
@@ -226,16 +230,14 @@ final class ApplicationBuilder
      */
     public function compileContainerCache(): string
     {
-        if ($this->containerCache === null) {
-            throw new ApplicationException('There is no container cache: call withContainerCache().');
-        }
+        $file = $this->containerCache ?? throw new ApplicationException('There is no container cache: call withContainerCache().');
 
         [$services] = $this->collect();
         $class = 'Zana\\CompiledContainer\\Container' . bin2hex(random_bytes(8));
-        self::writeAtomically($this->containerCache, (new ContainerCompiler())->compile($services, $class) . "\nreturn \\{$class}::class;\n");
-        unset(self::$compiled[$this->containerCache]);
+        $this->writeCompiled($file, (new ContainerCompiler())->compile($services, $class) . "\nreturn \\{$class}::class;\n", 'container');
+        unset(self::$compiled[$file]);
 
-        return $this->containerCache;
+        return $file;
     }
 
     /**
@@ -267,6 +269,22 @@ final class ApplicationBuilder
     public function recompileStaleContainerInConsole(bool $recompile = true): self
     {
         $this->recompileInConsole = $recompile;
+
+        return $this;
+    }
+
+    /**
+     * Include the signed cache files after checking them, so OPcache serves
+     * them, instead of evaluating the bytes that were checked (2.35). Between
+     * the check and the include, someone who can write to the cache directory
+     * could swap a file. Use it where the web server cannot write there: the
+     * deployment runs cache:warm as another user. It also sets
+     * app.include_compiled_caches, which compiled Twig templates follow.
+     */
+    public function includeCompiledCaches(bool $include = true): self
+    {
+        $this->includeCompiled = $include;
+        $this->configuration = ConfigurationBuilder::merge($this->configuration, ['app' => ['include_compiled_caches' => $include]]);
 
         return $this;
     }
@@ -464,10 +482,11 @@ final class ApplicationBuilder
         }
 
         if (!isset(self::$configurations[$file])) {
-            if (!is_file($file)) {
+            $loaded = is_file($file) ? $this->loadCacheFile($file, 'configuration', $environment) : null;
+            if ($loaded === null) {
                 return null;
             }
-            $data = (static fn (string $path): mixed => require $path)($file);
+            $data = $loaded[0];
             if (!is_array($data) || !is_string($data['environment'] ?? null) || !is_array($data['modules'] ?? null) || !is_array($data['values'] ?? null)) {
                 return null;
             }
@@ -485,17 +504,18 @@ final class ApplicationBuilder
      */
     private function writeConfigurationCache(Environment $environment, array $modules, array $values): void
     {
-        assert($this->configurationCache !== null);
+        $file = $this->configurationCache;
+        assert($file !== null);
         self::assertCacheable($values, '');
 
         $data = ['environment' => $environment->name, 'modules' => $modules, 'values' => $values];
-        self::writeAtomically(
-            $this->configurationCache,
+        $this->writeCompiled(
+            $file,
             "<?php\n\n// The configuration files' values, written by Zana for the \"{$environment->name}\" environment (ADR-019).\n"
             . "// Delete it, or run cache:clear, after changing a configuration file.\n\nreturn " . var_export($data, true) . ";\n",
-            'configuration cache',
+            'configuration',
         );
-        self::$configurations[$this->configurationCache] = $data;
+        self::$configurations[$file] = $data;
     }
 
     /**
@@ -522,14 +542,15 @@ final class ApplicationBuilder
 
         $file = $this->containerCache;
         $remembered = isset(self::$compiled[$file]);
-        if ($remembered || is_file($file)) {
+        $class = $remembered ? self::$compiled[$file] : (is_file($file) ? $this->loadCompiled($file, $environment) : null);
+        if ($class !== null) {
             try {
-                return $services->build(compiled: self::loadCompiled($file));
+                return $services->build(compiled: $class);
             } catch (StaleCompilationException $e) {
-                if ($remembered) {
-                    // Another process may have rewritten the file since this one loaded it
+                // Another process may have rewritten the file since this one loaded it
+                if ($remembered && ($fresh = $this->classDeclaredIn($file, $environment)) !== null) {
                     try {
-                        return $services->build(compiled: self::$compiled[$file] = self::classDeclaredIn($file));
+                        return $services->build(compiled: self::$compiled[$file] = $fresh);
                     } catch (StaleCompilationException $e) {
                     }
                 }
@@ -541,44 +562,50 @@ final class ApplicationBuilder
 
         $class = 'Zana\\CompiledContainer\\Container' . bin2hex(random_bytes(8));
         $source = (new ContainerCompiler())->compile($services, $class);
-        self::writeAtomically($file, $source . "\nreturn \\{$class}::class;\n");
+        $this->writeCompiled($file, $source . "\nreturn \\{$class}::class;\n", 'container');
         unset(self::$compiled[$file]);
 
-        return $services->build(compiled: self::loadCompiled($file));
+        return $services->build(compiled: $this->loadCompiled($file, $environment) ?? throw new ApplicationException("The container cache {$file} was changed while it was written."));
     }
 
     /**
-     * Include a compiled container file and return the class it declares.
+     * Load a compiled container file and return the class it declares, or
+     * null when the file may not be loaded (see loadCacheFile()).
      *
      * The file returns its class name, so a load costs one include (served by
-     * OPcache) rather than reading the file; the name is then remembered.
+     * OPcache) rather than reading the file, when nothing is signed or with
+     * includeCompiledCaches(); the name is then remembered.
      *
-     * @return class-string
+     * @return class-string|null
      */
-    private static function loadCompiled(string $file): string
+    private function loadCompiled(string $file, Environment $environment): ?string
     {
         if (isset(self::$compiled[$file])) {
             return self::$compiled[$file];
         }
 
-        $name = require $file;
-        if (is_string($name) && class_exists($name, false)) {
-            return self::$compiled[$file] = $name;
+        $loaded = $this->loadCacheFile($file, 'container', $environment);
+        if ($loaded === null) {
+            return null;
+        }
+        if (is_string($loaded[0]) && class_exists($loaded[0], false)) {
+            return self::$compiled[$file] = $loaded[0];
         }
 
         // A file written by an earlier version, without the return statement
-        return self::$compiled[$file] = self::classDeclaredIn($file);
+        return self::$compiled[$file] = $this->classDeclaredIn($file, $environment) ?? throw new ApplicationException("{$file} was changed while it was read.");
     }
 
     /**
      * Find the class a compiled container file declares by reading it, and
-     * include the file unless the class is already declared.
+     * load the file unless the class is already declared; null when the file
+     * may not be loaded.
      *
-     * @return class-string
+     * @return class-string|null
      */
-    private static function classDeclaredIn(string $file): string
+    private function classDeclaredIn(string $file, Environment $environment): ?string
     {
-        $source = (string) file_get_contents($file);
+        $source = (string) @file_get_contents($file);
         if (preg_match('/^namespace\s+([^;]+);/m', $source, $namespace) !== 1
             || preg_match('/^final class (\w+) extends/m', $source, $class) !== 1
         ) {
@@ -586,8 +613,8 @@ final class ApplicationBuilder
         }
 
         $name = $namespace[1] . '\\' . $class[1];
-        if (!class_exists($name, false)) {
-            require $file;
+        if (!class_exists($name, false) && $this->loadCacheFile($file, 'container', $environment) === null) {
+            return null;
         }
 
         if (!class_exists($name, false)) {
@@ -595,6 +622,56 @@ final class ApplicationBuilder
         }
 
         return $name;
+    }
+
+    /**
+     * Load a cache file and return what it returns, or null when it may not be
+     * loaded (2.35).
+     *
+     * Without a key, the file is included, as before. With one, only a file it
+     * signed is loaded: a file without a signature, written before the key or
+     * by an earlier version, is treated as missing and rewritten. A file
+     * signed otherwise, changed or written with another secret, stops the boot
+     * in production; it is rewritten in other environments, and in the console
+     * with recompileStaleContainerInConsole(), so that cache:warm runs after
+     * the secret changed.
+     *
+     * A signed file is read once, checked and evaluated, so the bytes checked
+     * are the bytes that run: including it after the check would leave a
+     * moment in which the file could be swapped. With includeCompiledCaches(),
+     * it is checked, then included, for OPcache.
+     *
+     * @param 'container'|'configuration' $kind
+     * @return array{mixed}|null
+     * @throws ApplicationException
+     */
+    private function loadCacheFile(string $file, string $kind, Environment $environment): ?array
+    {
+        $key = CompiledFile::key($this->configuration);
+        if ($key === null) {
+            return [(static fn (string $path): mixed => require $path)($file)];
+        }
+
+        $source = $this->includeCompiled ? null : (string) @file_get_contents($file);
+        $state = $source === null ? CompiledFile::check($file, $kind, $key) : CompiledFile::verify($source, $kind, $key);
+        if ($state === CompiledFile::FORGED && $environment->isProduction() && !($this->recompileInConsole && PHP_SAPI === 'cli')) {
+            throw new ApplicationException("The {$kind} cache {$file} does not carry this application's signature: it was changed, or written with another security.secret. It was not loaded. Run cache:warm, or delete the file.");
+        }
+        if ($state !== CompiledFile::SIGNED) {
+            return null;
+        }
+
+        return [$source === null ? (static fn (string $path): mixed => require $path)($file) : CompiledFile::evaluate($source)];
+    }
+
+    /**
+     * @param 'container'|'configuration' $kind
+     * @throws ApplicationException When the file cannot be written
+     */
+    private function writeCompiled(string $file, string $source, string $kind): void
+    {
+        $key = CompiledFile::key($this->configuration);
+        self::writeAtomically($file, $key === null ? $source : CompiledFile::sign($source, $kind, $key), $kind === 'container' ? 'container cache' : 'configuration cache');
     }
 
     private static function writeAtomically(string $file, string $contents, string $what = 'container cache'): void
